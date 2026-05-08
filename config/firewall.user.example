@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------
+# Teltonika Tor WAN Guard - /etc/firewall.user example
+# Blocks NEW inbound WAN traffic from Tor exit nodes to:
+# 1. The router itself via INPUT
+# 2. Port-forwarded/internal services via FORWARD
+#
+# Does NOT block LAN -> WAN outbound Tor or OSINT traffic.
+# ---------------------------------------------------------------------
+
+CONF_FILE="/etc/torblock.conf"
+[ -f "$CONF_FILE" ] && . "$CONF_FILE"
+
+IPSET_NAME="${IPSET_NAME:-tor_exit}"
+WAN_IFACE="${WAN_IFACE:-wan}"
+IPSET_MAXELEM="${IPSET_MAXELEM:-65536}"
+
+# Ensure the set exists so firewall reloads do not fail before the updater runs.
+ipset create "$IPSET_NAME" hash:ip family inet maxelem "$IPSET_MAXELEM" -exist
+
+# Refresh list asynchronously after firewall load.
+/root/update_tor_blocklist.sh >/dev/null 2>&1 &
+
+# Remove duplicate rules on firewall reload.
+iptables -D INPUT   -i "$WAN_IFACE" -m set --match-set "$IPSET_NAME" src -m conntrack --ctstate NEW -j DROP 2>/dev/null
+iptables -D FORWARD -i "$WAN_IFACE" -m set --match-set "$IPSET_NAME" src -m conntrack --ctstate NEW -j DROP 2>/dev/null
+
+# Ensure established/related return traffic is accepted before Tor inbound drop rules.
+iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+iptables -C FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+iptables -I FORWARD 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Drop NEW inbound Tor-origin traffic to router WAN services.
+iptables -I INPUT 2 -i "$WAN_IFACE" -m set --match-set "$IPSET_NAME" src \
+    -m conntrack --ctstate NEW -j DROP
+
+# Drop NEW inbound Tor-origin traffic to port-forwarded/internal services.
+iptables -I FORWARD 2 -i "$WAN_IFACE" -m set --match-set "$IPSET_NAME" src \
+    -m conntrack --ctstate NEW -j DROP
